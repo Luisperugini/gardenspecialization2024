@@ -20,6 +20,8 @@ library(sp)
 library(dplyr)
 library(brms)
 library(DHARMa)
+
+options(mc.cores = parallel::detectCores())
 Data.raw <- read.csv("Supplement+1_+Garden+plant-pollinator+data (4) - Sheet1 (2).csv", stringsAsFactors = T)
 
 Data.raw.a <- Data.raw[Data.raw$Survey.type == "A",]
@@ -343,6 +345,8 @@ count_interactions <- function(network) {
 }
 num_interactions_per_network <- sapply(Networks, count_interactions)
 
+varia_clean$log_soma <- log(varia_clean$Riq.An + varia_clean$Riq.Pl)
+
 spec.list <- lapply(Networks, FUN = specieslevel, index = "d", level = "lower")
 unlist(spec.list)
 write.csv(df, "df.csv")
@@ -360,6 +364,8 @@ df$bio12.z <- scale(df$bio12)
 df$Riq.Pl.z <- scale(df$Riq.Pl)
 df$Riq.An.z <- scale(df$Riq.An)
 df$Phylo <- df$SP
+df$log_soma <- log(df$Riq.An + df$Riq.Pl)
+df$log_soma.z <- as.numeric(scale(df$log_soma))
 
 levels(df$SP)
 
@@ -401,7 +407,7 @@ p<-ggplot(data = world) +
 ggsave("meu_grafico.svg", plot = p, width = 8, height = 5, dpi = 300, units = "in")
 ggsave("meu_grafico.png", plot = p, width = 8, height = 5, dpi = 600, units = "in")
 
-############################# Europe ##########################
+############################# Europe map ##########################
 q <- p + coord_sf(xlim = c(-15, 25), ylim = c(33, 65), expand = F) + 
   guides(fill="none", x = "none", y = "none") + 
   theme(
@@ -424,7 +430,7 @@ setdiff(levels(df$SP), Filo.Regional$tip.label)
 setdiff(Filo.Regional$tip.label, levels(df$SP))
 Filo.vcv <- ape::vcv(Filo.Regional)
 
-######################################### data description ##################
+######################################### Data description ##################
 
 count_interactions <- function(network) {
   interactions_plants <- colSums(network != 0)
@@ -596,6 +602,8 @@ mean_percent_per_network <- sapply(percent_interactions_per_plant, mean, na.rm =
 ########################## Data Analysis ###########################
 # Beta distribution ###############
 
+#################### adicionar as interaçoes no modelo geral ###########
+
 options(mc.cores = parallel::detectCores())
 
 
@@ -605,8 +613,13 @@ Beta_Phyl <- brm(d.beta ~ (1|SP) + (1|gr(Phylo, cov = Filo)), family = "beta", d
 plot(Beta_Phyl)
 
 
-Beta_RichEnvSP <- brm(d.beta ~ Riq.Pl.z + Riq.An.z + bio1.z + bio12.z + (1|SP) + (1|NetID), 
-                      family = "beta", data = df, chains = 8, iter = 2250, warmup = 1000)
+Beta_RichEnvSP <- brm(d.beta ~ log_soma.z + bio1.z + bio12.z + log_soma.z:bio1.z + log_soma.z:bio12.z + (1|SP) + (1|NetID), 
+  family = "beta", 
+  data = df, 
+  chains = 8, 
+  iter = 2250, 
+  warmup = 1000
+)
 
 plot(Beta_RichEnvSP)
 
@@ -624,54 +637,85 @@ library(car)
 library(forcats)
 library(dplyr)
 library(ggdist)
-Blevz <- lm(Riq.Pl ~  bio1 + bio12 + Age.of.property..years. + Type + Garden.size..m2., data = varia_clean)
-summary(Blevz)
-Plant_drop1<-drop1(Blevz, test = "F")
-anova(Blevz)
-emmeans_plant <- emmeans(Blevz, pairwise ~ Type)
+library(MASS)
+library(MuMIn)
+mean(varia_clean$Riq.Pl)
+var(varia_clean$Riq.Pl) 
+
+model.plant.rich <- glm.nb(Riq.Pl ~ bio1 + bio12 + Type + log(Garden.size..m2.) + 
+                             Type : log(Garden.size..m2.), 
+                           data = varia_clean, na.action = "na.fail")
+
+model.plant.rich.selection <- dredge(model.plant.rich)
+
+model.plant.rich.best <- glm.nb(Riq.Pl ~ Type + log(Garden.size..m2.), 
+                           data = varia_clean, na.action = "na.fail")
+
+summary(model.plant.rich.best)
+anova(model.plant.rich)
+
+
+emmeans_plant <- emmeans(model.plant.rich.best, pairwise ~ Type, type="response",
+                         at = list(Garden.size..m2. = 100))
 
 ###################################### Plot plants ##################################
+#Garden type#####################
 
-emmeans_df <- as.data.frame(emmeans_plant$emmeans)
+emmeans_df <- as.data.frame(emmeans_plant$emmean)
 
 Significance <- data.frame(Type = c("rural", "urban", "suburban"),
-                           Text = c("a", "ab", "b"))
+                           Text = c("a", "a", "b"))
 
 plot1 <- ggplot(varia_clean, aes(x = Type, y = Riq.Pl)) +
   geom_swarm() +
-  geom_point(data = emmeans_df, aes(x = Type, y = emmean), 
+  geom_point(data = emmeans_df, aes(x = Type, y = response), 
              inherit.aes = FALSE, shape = 21, size = 3, 
              fill = "red", color = "red") +                        
-  geom_errorbar(data = emmeans_df, aes(x = Type, ymin = emmean - SE, ymax = emmean + SE), inherit.aes = FALSE, width = 0.2, color = "black") +  
+  geom_errorbar(data = emmeans_df, 
+                aes(x = Type, ymin = response - SE, ymax = response + SE), 
+                inherit.aes = FALSE, width = 0.2, color = "black") +  
   geom_text(data = Significance, y = 100, mapping = aes(label = Text)) +
   labs(x = "Garden Type", y = "Plant Species Richness") +
   theme_classic() +
   theme(legend.position = "none", 
         axis.title = element_text(size = 12, face = "bold"),
         axis.text = element_text(size = 11))
-ggsave("Fig3Richhness.svg", plot = plot1, width = 4, height = 3)
 
+ggsave("Fig3Richhness.svg", plot = plot1, width = 4, height = 3)
+ggsave("Fig3Richhness.png", plot = plot1, width = 4, height = 3)
+
+plot.2.plants <- ggplot(varia_clean, aes(x = Garden.size..m2., y = Riq.Pl, colour = Type)) +
+  geom_smooth(method = "glm.nb", se = TRUE) + 
+  geom_point(size = 3) +  
+  labs(x = "log(Garden.size..m2.)", y = "Plant Species Richness") +  
+  scale_x_log10() +
+  theme_classic() 
+
+  
+ggsave("plot.2.plants.svg", plot = plot.2.plants, width = 6, height = 4)
+ggsave("plot.2.plants.png", plot = plot.2.plants, width = 6, height = 4)
+
+write.xlsx(pol_drop1, "pol_drop1_resultados.xlsx")
+write.xlsx(Plant_drop1, "Plant_drop1_resultados.xlsx")
 ################## Pollinators rich ##################
 
-Blevz2 <- lm(Riq.An ~ Riq.Pl + bio1 + bio12 + Age.of.property..years. + Type + Garden.size..m2., data = varia_clean)
+Blevz2 <- glm.nb(Riq.An ~ Riq.Pl + bio1 + bio12 + Type + log(Garden.size..m2.) + Type : log(Garden.size..m2.), data = varia_clean)
+
 summary(Blevz2)
-pol_drop1<-drop1(Blevz2, test = "F")
+anova(Blevz2)
 
-Blevz2.PlvsPol <- lm(Riq.An ~ Riq.Pl, data = varia_clean)
-summary(Blevz2.PlvsPol)
-drop1(Blevz2.PlvsPol, test = "F")
-
-
-############################ plot pollinators  ##################################
+############################ plot pollinators  #############################
 
 plot.2<-ggplot(varia_clean, aes(x = Riq.Pl, y = Riq.An, color = bio12)) +
   geom_point(alpha = 0.7, size = 3) + 
-  geom_smooth(method = "lm", formula = y ~ x, se = TRUE, color = "black") + 
+  geom_smooth(method = "glm.nb", formula = y ~ x, se = TRUE, color = "black") + 
   labs(x = "Plant Species Richness", y = "Pollinator Species Richness", color = "Precipitation (mm)") +
   theme_classic() +
+  theme (axis.title = element_text(size = 12, face = "bold"),
+          axis.text = element_text(size = 11)) +
   scale_color_gradient(low = "blue", high = "yellow") +
-  scale_x_log10() +
-  scale_y_log10()
+  scale_y_log10() +
+  coord_cartesian(ylim = c(6, 800))
 ggsave("Fig4.svg", plot = plot.2, width = 6, height = 4)
 ggsave("Fig4.png", plot = plot.2, width = 6, height = 4)
 write.xlsx(pol_drop1, "pol_drop1_resultados.xlsx")
